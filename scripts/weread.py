@@ -367,24 +367,27 @@ def get_cookie():
     if not cookie or not cookie.strip():
         raise Exception("没有找到cookie，请按照文档填写cookie")
     return cookie
-    
 
+import re
+import os
 
 def extract_page_id():
-    url = os.getenv("NOTION_PAGE")
+    url = os.getenv("NOTION_PAGE", "").strip()
+
+    # ✅ 如果直接给的是 32 位 ID，直接使用
+    if re.fullmatch(r"[0-9a-fA-F]{32}", url):
+        return url.lower()
+
+    # ❗ 如果没填
     if not url:
-        url = os.getenv("NOTION_DATABASE_ID")
-    if not url:
-        raise Exception("没有找到NOTION_PAGE，请按照文档填写")
-    # 正则表达式匹配 32 个字符的 Notion page_id
-    match = re.search(
-        r"([a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})",
-        url,
-    )
+        raise Exception("没有找到 NOTION_PAGE，请检查 GitHub Secrets")
+
+    # ✅ 从 URL 中提取 32 位 ID
+    match = re.search(r"[0-9a-fA-F]{32}", url)
     if match:
-        return match.group(0)
-    else:
-        raise Exception(f"获取NotionID失败，请检查输入的Url是否正确")
+        return match.group(0).lower()
+
+    raise Exception("获取 Notion ID 失败，请检查 NOTION_PAGE 是否正确")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
