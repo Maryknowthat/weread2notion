@@ -18,10 +18,8 @@ from utils import (
     get_date,
     get_heading,
     get_icon,
-    get_number,
     get_quote,
     get_table_of_contents,
-    get_title,
 )
 
 load_dotenv()
@@ -35,9 +33,6 @@ WEREAD_REVIEW_LIST_URL = "https://weread.qq.com/web/review/list"
 WEREAD_BOOK_INFO = "https://weread.qq.com/web/book/info"
 
 
-# -----------------------------
-# Helpers
-# -----------------------------
 def parse_cookie_string(cookie_string: str):
     cookie = SimpleCookie()
     cookie.load(cookie_string)
@@ -50,8 +45,6 @@ def parse_cookie_string(cookie_string: str):
 
 
 def refresh_token(_exception):
-    # Touch homepage to refresh session; retrying lib expects a boolean return via retry_on_exception,
-    # but this project uses it as "call then retry". We'll keep compatible behavior.
     session.get(WEREAD_URL)
     return True
 
@@ -63,7 +56,7 @@ def get_bookmark_list(bookId):
     params = dict(bookId=bookId)
     r = session.get(WEREAD_BOOKMARKLIST_URL, params=params)
     if r.ok:
-        updated = r.json().get("updated", [])
+        updated = r.json().get("updated", []) or []
         updated = sorted(
             updated,
             key=lambda x: (x.get("chapterUid", 1), int(x.get("range").split("-")[0])),
@@ -84,7 +77,7 @@ def get_read_info(bookId):
 
 @retry(stop_max_attempt_number=3, wait_fixed=5000, retry_on_exception=refresh_token)
 def get_bookinfo(bookId):
-    """获取书的详情"""
+    """获取书的详情（本版本不写入 Notion，仅保留函数，避免影响主流程）"""
     session.get(WEREAD_URL)
     params = dict(bookId=bookId)
     r = session.get(WEREAD_BOOK_INFO, params=params)
@@ -138,16 +131,18 @@ def get_notebooklist():
         books = data.get("books", []) or []
         books.sort(key=lambda x: x.get("sort", 0))
         return books
-    print(r.text)
+    else:
+        print(r.text)
     return []
 
 
 def transform_id(book_id):
     id_length = len(book_id)
+
     if re.match(r"^\d*$", book_id):
         ary = []
         for i in range(0, id_length, 9):
-            ary.append(format(int(book_id[i: min(i + 9, id_length)]), "x"))
+            ary.append(format(int(book_id[i : min(i + 9, id_length)]), "x"))
         return "3", ary
 
     result = ""
@@ -175,7 +170,7 @@ def calculate_book_str_id(book_id):
             result += "g"
 
     if len(result) < 20:
-        result += digest[0: 20 - len(result)]
+        result += digest[0 : 20 - len(result)]
 
     md5 = hashlib.md5()
     md5.update(result.encode("utf-8"))
@@ -183,10 +178,10 @@ def calculate_book_str_id(book_id):
     return result
 
 
-def try_get_cloud_cookie(url, id, password):
+def try_get_cloud_cookie(url, cid, password):
     if url.endswith("/"):
         url = url[:-1]
-    req_url = f"{url}/get/{id}"
+    req_url = f"{url}/get/{cid}"
     data = {"password": password}
     response = requests.post(req_url, data=data)
     if response.status_code != 200:
@@ -217,7 +212,11 @@ def get_cookie():
 
 
 def extract_page_id():
-    # In this project, NOTION_PAGE is used as database id (or URL containing it)
+    """
+    NOTION_PAGE 这里实际存的是“数据库URL或数据库ID”
+    - 如果直接给 32 位 ID：直接用
+    - 如果给 URL：从中提取 32 位 ID
+    """
     url = os.getenv("NOTION_PAGE", "").strip()
 
     if re.fullmatch(r"[0-9a-fA-F]{32}", url):
@@ -234,13 +233,10 @@ def extract_page_id():
 
 
 # -----------------------------
-# Notion minimal DB operations
-# Requires ONLY:
-# - BookId (Title)
-# - Sort (Number)
+# Notion DB operations (7 fields)
 # -----------------------------
 def get_sort():
-    """获取database中的最新Sort（数字）"""
+    """获取 database 里 Sort 最大值，用于增量同步"""
     flt = {"property": "Sort", "number": {"is_not_empty": True}}
     sorts = [{"property": "Sort", "direction": "descending"}]
     response = client.databases.query(
@@ -253,7 +249,7 @@ def get_sort():
 
 
 def check(bookId):
-    """检查是否已经插入过，如果已经插入就删除（按 Title 过滤）"""
+    """检查是否已经插入过，如果插入过就删除（BookId 是 Title）"""
     flt = {"property": "BookId", "title": {"equals": str(bookId)}}
     response = client.databases.query(database_id=database_id, filter=flt)
     for result in response.get("results", []):
@@ -264,13 +260,42 @@ def check(bookId):
 
 
 def insert_to_notion(bookName, bookId, cover, sort, author, isbn, rating, categories):
-    """精简版：只写 BookId(Title) + Sort(Number)，其他都不写"""
+    """
+    只写 7 个字段：
+    BookId(Title), BookName(Text), Author(Text), Cover(Files), Status(Select), Sort(Number), Categories(Multi-select)
+    """
     parent = {"database_id": database_id, "type": "database_id"}
+
+    # 封面兜底
+    if not cover or not str(cover).startswith("http"):
+        cover = "https://www.notion.so/icons/book_gray.svg"
+
+    # 阅读状态（在读/读完）
+    status_name = "在读"
+    read_info = get_read_info(bookId=bookId)
+    if read_info:
+        markedStatus = read_info.get("markedStatus", 0)
+        status_name = "读完" if markedStatus == 4 else "在读"
+
     properties = {
-        "BookId": get_title(str(bookId)),   # MUST be Title column named BookId
-        "Sort": get_number(int(sort)),      # MUST be Number column named Sort
+        "BookId": {"title": [{"text": {"content": str(bookId)}}]},
+        "BookName": {"rich_text": [{"text": {"content": str(bookName or "")}}]},
+        "Author": {"rich_text": [{"text": {"content": str(author or "")}}]},
+        "Sort": {"number": int(sort) if sort is not None else 0},
+        "Status": {"select": {"name": status_name}},
+        "Cover": {
+            "files": [
+                {"name": "cover", "type": "external", "external": {"url": str(cover)}}
+            ]
+        },
     }
-    # Avoid icon/cover to prevent type errors
+
+    if categories:
+        properties["Categories"] = {
+            "multi_select": [{"name": str(x)} for x in categories if x]
+        }
+
+    # 不设置页面 icon/cover，避免额外类型问题（封面已作为属性写入 Cover）
     response = client.pages.create(parent=parent, properties=properties)
     return response["id"]
 
@@ -283,7 +308,7 @@ def add_children(page_id, children):
     for i in range(0, len(children) // 100 + 1):
         time.sleep(0.3)
         response = client.blocks.children.append(
-            block_id=page_id, children=children[i * 100: (i + 1) * 100]
+            block_id=page_id, children=children[i * 100 : (i + 1) * 100]
         )
         results.extend(response.get("results", []))
     return results if len(results) == len(children) else None
@@ -299,39 +324,43 @@ def add_grandchild(grandchild, results):
 def get_children(chapter, summary, bookmark_list):
     children = []
     grandchild = {}
-
     if chapter is not None:
+        # 目录
         children.append(get_table_of_contents())
-        grouped = {}
+        d = {}
         for data in bookmark_list:
             chapterUid = data.get("chapterUid", 1)
-            grouped.setdefault(chapterUid, []).append(data)
+            d.setdefault(chapterUid, []).append(data)
 
-        for ch_uid, items in grouped.items():
-            if ch_uid in chapter:
+        for key, value in d.items():
+            if key in chapter:
                 children.append(
-                    get_heading(chapter[ch_uid].get("level"), chapter[ch_uid].get("title"))
+                    get_heading(
+                        chapter.get(key).get("level"), chapter.get(key).get("title")
+                    )
                 )
-            for it in items:
-                markText = it.get("markText", "")
+            for i in value:
+                markText = i.get("markText", "")
                 for j in range(0, len(markText) // 2000 + 1):
                     children.append(
                         get_callout(
-                            markText[j * 2000: (j + 1) * 2000],
-                            it.get("style"),
-                            it.get("colorStyle"),
-                            it.get("reviewId"),
+                            markText[j * 2000 : (j + 1) * 2000],
+                            i.get("style"),
+                            i.get("colorStyle"),
+                            i.get("reviewId"),
                         )
                     )
-                if it.get("abstract"):
-                    grandchild[len(children) - 1] = get_quote(it.get("abstract"))
+                if i.get("abstract"):
+                    quote = get_quote(i.get("abstract"))
+                    grandchild[len(children) - 1] = quote
     else:
+        # 没章节信息
         for data in bookmark_list:
             markText = data.get("markText", "")
             for i in range(0, len(markText) // 2000 + 1):
                 children.append(
                     get_callout(
-                        markText[i * 2000: (i + 1) * 2000],
+                        markText[i * 2000 : (i + 1) * 2000],
                         data.get("style"),
                         data.get("colorStyle"),
                         data.get("reviewId"),
@@ -345,13 +374,12 @@ def get_children(chapter, summary, bookmark_list):
             for j in range(0, len(content) // 2000 + 1):
                 children.append(
                     get_callout(
-                        content[j * 2000: (j + 1) * 2000],
+                        content[j * 2000 : (j + 1) * 2000],
                         i.get("style"),
                         i.get("colorStyle"),
                         i.get("review", {}).get("reviewId"),
                     )
                 )
-
     return children, grandchild
 
 
@@ -371,10 +399,8 @@ if __name__ == "__main__":
 
     session = requests.Session()
     session.cookies = parse_cookie_string(weread_cookie)
-
     client = Client(auth=notion_token, log_level=logging.ERROR)
 
-    # Warm up
     session.get(WEREAD_URL)
 
     latest_sort = get_sort()
@@ -386,24 +412,23 @@ if __name__ == "__main__":
             if sort <= latest_sort:
                 continue
 
-            book = item.get("book", {})
+            book = item.get("book", {}) or {}
             title = book.get("title", "")
             cover = (book.get("cover") or "").replace("/s_", "/t7_")
             bookId = book.get("bookId")
-            author = book.get("author")
+            author = book.get("author", "")
             categories = book.get("categories")
             if categories:
                 categories = [x.get("title") for x in categories if x.get("title")]
 
             print(f"正在同步 {title} ,一共{len(books)}本，当前是第{index+1}本。")
 
-            # delete old page if exists
             check(bookId)
 
-            # create minimal page record
-            page_id = insert_to_notion(title, bookId, cover, sort, author, "", 0, categories)
+            page_id = insert_to_notion(
+                title, bookId, cover, sort, author, "", 0, categories
+            )
 
-            # fetch content blocks
             chapter = get_chapter_info(bookId)
             bookmark_list = get_bookmark_list(bookId) or []
             summary, reviews = get_review_list(bookId)
@@ -413,8 +438,14 @@ if __name__ == "__main__":
                 bookmark_list,
                 key=lambda x: (
                     x.get("chapterUid", 1),
-                    0 if (x.get("range", "") == "" or x.get("range").split("-")[0] == "")
-                    else int(x.get("range").split("-")[0]),
+                    (
+                        0
+                        if (
+                            x.get("range", "") == ""
+                            or x.get("range").split("-")[0] == ""
+                        )
+                        else int(x.get("range").split("-")[0])
+                    ),
                 ),
             )
 
