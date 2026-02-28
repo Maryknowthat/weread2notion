@@ -11,7 +11,6 @@ jobs:
     env:
       NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
       NOTION_PAGE: ${{ secrets.NOTION_PAGE }}
-      NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
       WEREAD_COOKIE: ${{ secrets.WEREAD_COOKIE }}
       CC_URL: ${{ secrets.CC_URL }}
       CC_ID: ${{ secrets.CC_ID }}
